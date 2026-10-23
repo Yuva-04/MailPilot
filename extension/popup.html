@@ -1,0 +1,434 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MailPilot - Email Campaign Tool</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app">
+
+    <header class="header">
+      <div class="brand">
+        <div class="brand-icon">M</div>
+        <div>
+          <h1>MailPilot</h1>
+          <p>Email Campaign &amp; Mail Merge</p>
+        </div>
+      </div>
+      <span id="connectionBadge" class="badge">Checking...</span>
+    </header>
+
+    <nav class="tabs" aria-label="Main navigation">
+      <button class="tab active" data-section="dashboard" type="button">Dashboard</button>
+      <button class="tab" data-section="contacts" type="button">Contacts</button>
+      <button class="tab" data-section="templates" type="button">Templates</button>
+      <button class="tab" data-section="campaigns" type="button">Campaigns</button>
+    </nav>
+
+    <main>
+      <!-- DASHBOARD -->
+      <section id="dashboard" class="section active">
+        <div class="page-heading">
+          <div>
+            <h2>Dashboard</h2>
+            <p class="muted">Your email campaign workspace.</p>
+          </div>
+        </div>
+
+        <div class="stats">
+          <article class="stat-card">
+            <span>Total Contacts</span>
+            <strong id="contactCount">—</strong>
+          </article>
+          <article class="stat-card">
+            <span>Templates</span>
+            <strong id="templateCount">—</strong>
+          </article>
+          <article class="stat-card">
+            <span>Campaigns</span>
+            <strong id="campaignCount">—</strong>
+          </article>
+        </div>
+
+        <div class="panel">
+          <h3>Gmail Connection</h3>
+          <p id="gmailStatus" class="muted" aria-live="polite">
+            Checking Gmail connection...
+          </p>
+          <button id="connectGmailBtn" class="button primary" type="button">
+            Connect Gmail
+          </button>
+        </div>
+
+        <div class="panel">
+          <h3>Quick Actions</h3>
+          <div class="button-row">
+            <button class="button secondary" data-go="contacts" type="button">
+              Manage Contacts
+            </button>
+            <button class="button secondary" data-go="templates" type="button">
+              Create Template
+            </button>
+            <button class="button secondary" data-go="campaigns" type="button">
+              Manage Campaigns
+            </button>
+          </div>
+        </div>
+
+        <div class="panel danger-panel">
+          <h3>Data Management</h3>
+          <p class="muted">
+            Reset application data only when you intentionally want to clear it.
+            This operation may permanently remove contacts, templates, campaigns,
+            and tracking records, depending on the backend reset implementation.
+          </p>
+          <button id="resetDataBtn" class="button danger" type="button">
+            Reset All Data
+          </button>
+          <p class="hint">
+            Requires a protected backend operation and explicit confirmation.
+            This action requires confirmation and a valid, protected backend endpoint.
+        </div>
+      </section>
+
+      <!-- CONTACTS -->
+      <section id="contacts" class="section">
+        <div class="page-heading">
+          <div>
+            <h2>Contacts</h2>
+            <p class="muted">Add, import, edit, and remove individual contacts.</p>
+          </div>
+        </div>
+
+        <form id="addContactForm" class="panel">
+          <h3>Add New Contact</h3>
+
+          <label for="newContactEmail">Email Address *</label>
+          <input
+            id="newContactEmail"
+            name="email"
+            type="email"
+            placeholder="person@example.com"
+            autocomplete="email"
+            required
+          >
+
+          <div class="form-grid">
+            <div>
+              <label for="newContactFirstName">First Name</label>
+              <input
+                id="newContactFirstName"
+                name="first_name"
+                type="text"
+                placeholder="First name"
+                autocomplete="given-name"
+              >
+            </div>
+            <div>
+              <label for="newContactLastName">Last Name</label>
+              <input
+                id="newContactLastName"
+                name="last_name"
+                type="text"
+                placeholder="Last name"
+                autocomplete="family-name"
+              >
+            </div>
+          </div>
+
+          <label for="newContactCompany">Company</label>
+          <input
+            id="newContactCompany"
+            name="company"
+            type="text"
+            placeholder="Company name"
+            autocomplete="organization"
+          >
+
+          <button class="button primary" type="submit">Add Contact</button>
+          <p id="addContactMessage" class="status-message" aria-live="polite"></p>
+        </form>
+
+        <form id="contactForm" class="panel">
+          <h3>Import Contacts from CSV</h3>
+          <p class="muted">
+            Upload a CSV file containing contact information.
+          </p>
+
+          <label for="csvFile">Choose CSV File</label>
+          <input
+            id="csvFile"
+            name="file"
+            type="file"
+            accept=".csv,text/csv"
+            required
+          >
+
+          <button class="button primary" type="submit">Import CSV</button>
+          <p id="contactMessage" class="status-message" aria-live="polite">
+            No import performed yet.
+          </p>
+        </form>
+
+        <div class="panel">
+          <div class="panel-heading">
+            <div>
+              <h3>Saved Contacts</h3>
+              <p class="muted">Manage contacts individually.</p>
+            </div>
+            <button
+              id="refreshContactsListBtn"
+              class="button secondary small"
+              type="button"
+            >
+              Refresh
+            </button>
+          </div>
+
+          <div id="savedContactsList" class="record-list" aria-live="polite">
+            Loading contacts...
+          </div>
+        </div>
+
+        <!-- Edit form: hidden until a contact is selected for editing -->
+        <form id="editContactForm" class="panel" hidden>
+          <h3>Edit Contact</h3>
+
+          <input id="editContactId" name="contact_id" type="hidden">
+
+          <label for="editContactEmail">Email Address *</label>
+          <input id="editContactEmail" name="email" type="email" required>
+
+          <div class="form-grid">
+            <div>
+              <label for="editContactFirstName">First Name</label>
+              <input id="editContactFirstName" name="first_name" type="text">
+            </div>
+            <div>
+              <label for="editContactLastName">Last Name</label>
+              <input id="editContactLastName" name="last_name" type="text">
+            </div>
+          </div>
+
+          <label for="editContactCompany">Company</label>
+          <input id="editContactCompany" name="company" type="text">
+
+          <div class="button-row">
+            <button class="button primary" type="submit">Save Changes</button>
+            <button id="cancelEditContactBtn" class="button secondary" type="button">
+              Cancel
+            </button>
+          </div>
+
+          <p id="editContactMessage" class="status-message" aria-live="polite"></p>
+        </form>
+      </section>
+
+      <!-- TEMPLATES -->
+      <section id="templates" class="section">
+        <div class="page-heading">
+          <div>
+            <h2>Email Templates</h2>
+            <p class="muted">Create reusable personalized email templates.</p>
+          </div>
+        </div>
+
+        <form id="templateForm" class="panel">
+          <h3>Create Template</h3>
+
+          <label for="templateName">Template Name *</label>
+          <input
+            id="templateName"
+            name="name"
+            type="text"
+            placeholder="Welcome Email"
+            required
+          >
+
+          <label for="emailSubject">Email Subject *</label>
+          <input
+            id="emailSubject"
+            name="subject"
+            type="text"
+            placeholder="Hello {{first_name}}"
+            required
+          >
+
+          <label for="emailBody">Email Body *</label>
+          <textarea
+            id="emailBody"
+            name="body"
+            rows="6"
+            placeholder="Hello {{first_name}},&#10;&#10;Welcome!"
+            required
+          ></textarea>
+
+          <p class="hint">
+            Merge fields: {{first_name}}, {{last_name}}, {{name}}, {{email}},
+            {{company}}
+          </p>
+
+          <button class="button primary" type="submit">Save Template</button>
+          <p id="templateMessage" class="status-message" aria-live="polite"></p>
+        </form>
+
+        <div class="panel">
+          <h3>Saved Templates</h3>
+          <div id="templateList" class="record-list" aria-live="polite">
+            Loading templates...
+          </div>
+        </div>
+      </section>
+
+      <!-- CAMPAIGNS -->
+      <section id="campaigns" class="section">
+        <div class="page-heading">
+          <div>
+            <h2>Campaigns</h2>
+            <p class="muted">Create, validate, send, and track campaigns.</p>
+          </div>
+        </div>
+
+        <form id="campaignForm" class="panel">
+          <h3>Create Campaign</h3>
+
+          <label for="campaignName">Campaign Name *</label>
+          <input
+            id="campaignName"
+            name="name"
+            type="text"
+            placeholder="October Newsletter"
+            required
+          >
+
+          <label for="campaignTemplate">Email Template *</label>
+          <select id="campaignTemplate" name="template_id" required>
+            <option value="">Select a template</option>
+          </select>
+
+          <button class="button primary" type="submit">Create Campaign</button>
+          <p id="campaignMessage" class="status-message" aria-live="polite">
+            No campaign created yet.
+          </p>
+        </form>
+
+        <div class="panel">
+          <h3>Campaign Preflight</h3>
+          <p class="muted">
+            Validate campaign eligibility before sending. This does not send emails.
+          </p>
+
+          <label for="preflightCampaign">Select Campaign</label>
+          <select id="preflightCampaign">
+            <option value="">Select a campaign</option>
+          </select>
+
+          <button id="preflightBtn" class="button secondary" type="button">
+            Check Campaign
+          </button>
+
+          <div id="preflightResult" class="result-area" aria-live="polite">
+            No preflight check performed yet.
+          </div>
+        </div>
+
+        <div class="panel">
+          <h3>Choose Campaign Recipients</h3>
+          <p class="muted">
+            Select the specific contacts who should receive the campaign.
+          </p>
+
+          <label for="recipientCampaign">Select Draft Campaign</label>
+          <select id="recipientCampaign">
+            <option value="">Select a draft campaign</option>
+          </select>
+
+          <div class="button-row">
+            <button id="refreshContactsBtn" class="button secondary small" type="button">
+              Refresh Contacts
+            </button>
+            <button id="selectAllContactsBtn" class="button secondary small" type="button">
+              Select All
+            </button>
+            <button id="clearContactsBtn" class="button secondary small" type="button">
+              Clear Selection
+            </button>
+          </div>
+
+          <p id="selectedContactCount" class="hint" aria-live="polite">
+            0 contacts selected.
+          </p>
+
+          <div id="recipientList" class="record-list">
+            Load contacts to choose recipients.
+          </div>
+
+          <button id="sendSelectedCampaignBtn" class="button primary" type="button">
+            Send to Selected Contacts
+          </button>
+
+          <p class="hint warning-text">
+            This action sends real emails. Verify the campaign and selected
+            recipients before sending.
+          </p>
+        </div>
+
+        <div class="panel">
+          <h3>Campaign Report</h3>
+          <p class="muted">
+            Review sending statistics and individual recipient outcomes.
+          </p>
+
+          <label for="reportCampaign">Select Campaign</label>
+          <select id="reportCampaign">
+            <option value="">Select a campaign</option>
+          </select>
+
+          <button id="loadReportBtn" class="button secondary" type="button">
+            Load Report
+          </button>
+
+          <div id="campaignReportResult" class="result-area" aria-live="polite">
+            No report loaded yet.
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-heading">
+            <div>
+              <h3>Saved Campaigns</h3>
+              <p class="muted">
+                Review your campaigns or delete a campaign you no longer need.
+              </p>
+            </div>
+            <button id="refreshCampaignsBtn" class="button secondary small" type="button">
+              Refresh
+            </button>
+          </div>
+
+          <div id="campaignList" class="record-list" aria-live="polite">
+            Loading campaigns...
+          </div>
+
+          <p class="hint">
+            Deleting a campaign should remove only that campaign and its
+            associated records, as permitted by the backend.
+          </p>
+        </div>
+      </section>
+
+      <div id="notice" class="notice" role="status" aria-live="polite"></div>
+    </main>
+
+    <footer>
+      <span>MailPilot · Local development</span>
+      <span>FastAPI Backend</span>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+
+{
+  "manifest_version": 3,
+  "name": "Email Campaign & Mail Merge Tool",
+  "version": "1.0.0",
+  "description": "Manage contacts, personalize email templates, and send Gmail campaigns.",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": [
+    "http://127.0.0.1:8001/*"
+  ],
+  "action": {
+    "default_title": "Email Campaign Tool",
+    "default_popup": "popup.html"
+  }
+}
