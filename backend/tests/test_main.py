@@ -1015,3 +1015,41 @@ def test_reset_data_supports_rollback_on_database_error(client):
     finally:
         db.close()
 
+
+# --------------------------------------------------
+# CAMPAIGN PAUSE / CANCELLATION VALIDATION
+# --------------------------------------------------
+
+def test_campaign_can_be_cancelled(client):
+    campaign_id = create_template_and_campaign(client)
+
+    response = client.put(
+        f"/campaigns/{campaign_id}",
+        json={"status": "cancelled"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["campaign"]["status"] == "cancelled"
+
+
+def test_campaign_can_be_paused(client):
+    campaign_id = create_template_and_campaign(client)
+
+    response = client.put(
+        f"/campaigns/{campaign_id}",
+        json={"status": "paused"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["campaign"]["status"] == "paused"
+
+
+def test_campaign_rejects_invalid_status(client):
+    campaign_id = create_template_and_campaign(client)
+
+    response = client.put(
+        f"/campaigns/{campaign_id}",
+        json={"status": "invalid_status"},
+    )
+
+    assert response.status_code == 400, response.text

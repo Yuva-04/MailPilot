@@ -5,11 +5,11 @@ import io
 import os
 
 import re
-
+import threading
+import time
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 
 from starlette.middleware.sessions import SessionMiddleware
-
 from fastapi.middleware.cors import CORSMiddleware
 
 from authlib.integrations.starlette_client import OAuth
@@ -31,21 +31,31 @@ from app.models import Campaign, CampaignRecipient, Contact, EmailTemplate, User
 
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
-
 from app.security import encrypt_refresh_token
 
-from app.services.gmail_services import send_email
+
 
 from fastapi.responses import StreamingResponse
 from app.retry_worker import process_due_retries
 from app.database import SessionLocal
-
-
+from app.services.gmail_services import send_email
 from app.retry_worker import (
     process_due_retries,
     recover_stuck_sending_records,
 )
+
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from pydantic import BaseModel, Field, field_validator
+
+from app.services.campaign_service import (
+    render_campaign_text,
+    get_retry_time,
+    claim_pending_recipient,
+)
+
+
+
 
 
 def run_retry_job():
@@ -67,13 +77,19 @@ def run_retry_job():
         db.close()
 
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scheduler = AsyncIOScheduler(timezone="UTC")
 
-    # Retries stay disabled unless explicitly enabled in the environment.
     retry_enabled = (
         os.getenv("ENABLE_EMAIL_RETRIES", "false").strip().lower()
+        == "true"
+    )
+    scheduled_checks_enabled = (
+        os.getenv("ENABLE_SCHEDULED_CAMPAIGN_CHECKS", "false")
+        .strip()
+        .lower()
         == "true"
     )
 
@@ -86,10 +102,26 @@ async def lifespan(app: FastAPI):
             max_instances=1,
             coalesce=True,
         )
+
+    if scheduled_checks_enabled:
+        from app.scheduled_campaign_worker import run_scheduled_campaign_job
+
+        scheduler.add_job(
+            run_scheduled_campaign_job,
+            trigger="interval",
+            seconds=30,
+            id="scheduled_campaign_check",
+            max_instances=1,
+            coalesce=True,
+        )
+
+    # Keep the scheduler stopped unless at least one worker is explicitly enabled.
+    if retry_enabled or scheduled_checks_enabled:
         scheduler.start()
 
     app.state.retry_scheduler = scheduler
     app.state.email_retries_enabled = retry_enabled
+    app.state.scheduled_campaign_checks_enabled = scheduled_checks_enabled
 
     try:
         yield
@@ -237,18 +269,61 @@ class EmailTemplateCreate(BaseModel):
     body: str = Field(min_length=1)
 
 class CampaignCreate(BaseModel):
-
     name: str = Field(min_length=1, max_length=200)
-
     template_id: int = Field(gt=0)
+    scheduled_at: datetime | None = None
+    timezone: str = "Asia/Kolkata"
+    contact_ids: list[int] = Field(default_factory=list)
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError("Invalid timezone, e.g. Asia/Kolkata")
+        return value
+
+    @field_validator("scheduled_at")
+    @classmethod
+    def validate_scheduled_at(
+        cls, value: datetime | None
+    ) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError(
+                "scheduled_at must include a timezone offset"
+            )
+        return value
+
 
 class CampaignUpdate(BaseModel):
-
     name: str | None = Field(default=None, min_length=1, max_length=200)
-
     template_id: int | None = Field(default=None, gt=0)
-
     status: str | None = None
+    scheduled_at: datetime | None = None
+    timezone: str | None = None
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError("Invalid timezone, e.g. Asia/Kolkata")
+        return value
+
+    @field_validator("scheduled_at")
+    @classmethod
+    def validate_scheduled_at(
+        cls, value: datetime | None
+    ) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError(
+                "scheduled_at must include a timezone offset"
+            )
+        return value
 
 class TestEmailRequest(BaseModel):
 
@@ -1447,75 +1522,100 @@ def preview_template(
 # --------------------------------------------------
 
 def campaign_to_dict(campaign: Campaign) -> dict:
-
     return {
-
         "id": campaign.id,
-
         "name": campaign.name,
-
         "status": campaign.status,
-
         "template_id": campaign.template_id,
-
-        "created_at": campaign.created_at,
-
+        "scheduled_at": (
+            campaign.scheduled_at.isoformat()
+            if campaign.scheduled_at
+            else None
+        ),
+        "timezone": campaign.timezone,
+        "created_at": (
+            campaign.created_at.isoformat()
+            if campaign.created_at
+            else None
+        ),
     }
 
 @app.post("/campaigns", status_code=201)
-
 def create_campaign(
-
     payload: CampaignCreate,
-
     db: Session = Depends(get_db),
-
     current_user: dict = Depends(get_current_database_user),
-
 ):
-
     template = db.query(EmailTemplate).filter(
-
         EmailTemplate.id == payload.template_id,
-
         EmailTemplate.user_id == current_user["id"],
-
     ).first()
 
     if not template:
-
-        raise HTTPException(status_code=404, detail="Email template not found.")
+        raise HTTPException(
+            status_code=404,
+            detail="Email template not found.",
+        )
 
     name = payload.name.strip()
-
     if not name:
+        raise HTTPException(
+            status_code=400,
+            detail="Campaign name cannot be empty.",
+        )
 
-        raise HTTPException(status_code=400, detail="Campaign name cannot be empty.")
+    # Remove duplicate contact IDs while preserving their order.
+    contact_ids = list(dict.fromkeys(payload.contact_ids))
+
+    # Validate contact ownership.
+    contacts = []
+    if contact_ids:
+        contacts = db.query(Contact).filter(
+            Contact.id.in_(contact_ids),
+            Contact.user_id == current_user["id"],
+        ).all()
+
+        if len(contacts) != len(contact_ids):
+            raise HTTPException(
+                status_code=400,
+                detail="One or more contacts are invalid or do not belong to you.",
+            )
 
     campaign = Campaign(
-
         user_id=current_user["id"],
-
         name=name,
-
         template_id=template.id,
-
-        status="draft",
-
+        status="scheduled" if payload.scheduled_at else "draft",
+        scheduled_at=payload.scheduled_at,
+        timezone=payload.timezone,
     )
 
-    db.add(campaign)
+    try:
+        db.add(campaign)
+        db.flush()
 
-    db.commit()
+        # Save recipients without sending emails.
+        for contact in contacts:
+            db.add(
+                CampaignRecipient(
+                    campaign_id=campaign.id,
+                    contact_id=contact.id,
+                    email=contact.email,
+                    status="pending",
+                )
+            )
 
-    db.refresh(campaign)
+        db.commit()
+        db.refresh(campaign)
+
+    except Exception:
+        db.rollback()
+        raise
 
     return {
-
         "message": "Campaign created successfully.",
-
         "campaign": campaign_to_dict(campaign),
-
+        "recipients_saved": len(contacts),
     }
 
 @app.get("/campaigns")
@@ -1756,6 +1856,13 @@ def update_campaign(
             raise HTTPException(status_code=404, detail="Email template not found.")
 
         campaign.template_id = template.id
+
+
+    if "scheduled_at" in updates:
+        campaign.scheduled_at = updates["scheduled_at"]
+
+    if "timezone" in updates:
+        campaign.timezone = updates["timezone"]
 
     if "status" in updates:
 
@@ -2309,73 +2416,20 @@ def reset_application_data(
 # CAMPAIGN LAUNCH
 
 # --------------------------------------------------
-
-def render_campaign_text(text: str, contact: Contact) -> str:
-
-    """Personalize supported merge fields in an email."""
-
-    values = {
-
-        "first_name": (contact.first_name or "").strip(),
-
-        "last_name": (contact.last_name or "").strip(),
-
-        "name": " ".join(
-
-            part for part in [
-
-                (contact.first_name or "").strip(),
-
-                (contact.last_name or "").strip(),
-
-            ] if part
-
-        ),
-
-        "email": (contact.email or "").strip(),
-
-        "company": (contact.company or "").strip(),
-
-    }
-
-    return re.sub(
-
-        r"\{\{\s*(first_name|last_name|name|email|company)\s*\}\}",
-
-        lambda match: values[match.group(1).lower()],
-
-        text or "",
-
-        flags=re.IGNORECASE,
-
-    )
-
-
-
-
-def get_retry_time(attempts: int) -> datetime:
-    """Return the next retry time using exponential backoff."""
-    delay_minutes = 2 ** max(0, attempts - 1)
-    delay_minutes = min(delay_minutes, 4)
-
-    return datetime.now(timezone.utc) + timedelta(
-        minutes=delay_minutes
-    )
-
-@app.post("/campaigns/{campaign_id}/launch")
-def launch_campaign(
-
+def _launch_campaign(
     campaign_id: int,
-
     payload: CampaignLaunchRequest,
-
-    db: Session = Depends(get_db),
-
-    current_user: dict = Depends(get_current_database_user),
-
+    db: Session,
+    current_user: dict,
+    *,
+    scheduled: bool = False,
 ):
+    """Shared campaign execution logic for manual and scheduled launches.
 
-    if not payload.confirm:
+    The scheduled=True path is called only by the internal worker after it
+    independently verifies that the campaign is due and still scheduled.
+    """
+    if not scheduled and not payload.confirm:
 
         raise HTTPException(
 
@@ -2398,17 +2452,30 @@ def launch_campaign(
         raise HTTPException(status_code=404, detail="Campaign not found.")
 
     
-    allowed_launch_states = {"draft", "paused"}
-
-    if campaign.status not in allowed_launch_states:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Campaign cannot be launched with status "
-                f"'{campaign.status}'. Only draft or paused "
-                "campaigns can be launched."
-            ),
-        )
+    if scheduled:
+        scheduled_at = campaign.scheduled_at
+        if scheduled_at is not None and scheduled_at.tzinfo is None:
+            scheduled_at = scheduled_at.replace(tzinfo=timezone.utc)
+        if (
+            campaign.status != "scheduled"
+            or scheduled_at is None
+            or scheduled_at > datetime.now(timezone.utc)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Campaign is no longer due and scheduled.",
+            )
+    else:
+        allowed_launch_states = {"draft", "paused"}
+        if campaign.status not in allowed_launch_states:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Campaign cannot be launched with status "
+                    f"'{campaign.status}'. Only draft or paused "
+                    "campaigns can be launched."
+                ),
+            )
 
     user = db.query(User).filter(
 
@@ -2559,55 +2626,6 @@ def launch_campaign(
     batch = pending_contacts[:payload.max_recipients]
     
     
-    # Persist selected unsubscribed contacts as skipped.
-    pending_ids = {contact.id for 
-    contact in pending_contacts}
-
-    for contact in contacts:
-        if contact.id in pending_ids:
-            continue
-
-        normalized_email = (contact.email or "").strip().casefold()
-        matching_contacts = (
-            db.query(Contact)
-            .filter(Contact.user_id == current_user["id"])
-            .all()
-        )
-
-        is_suppressed = any(
-            (item.email or "").strip().casefold() == normalized_email
-            and item.is_unsubscribed
-            for item in matching_contacts
-        )
-
-        if is_suppressed:
-            record = (
-                db.query(CampaignRecipient)
-                .filter(
-                    CampaignRecipient.campaign_id == campaign.id,
-                    CampaignRecipient.contact_id == contact.id,
-                )
-                .first()
-            )
-
-            if record is None:
-                record = CampaignRecipient(
-                    campaign_id=campaign.id,
-                    contact_id=contact.id,
-                    email=contact.email,
-                    status="skipped",
-                )
-                db.add(record)
-
-            record.email = contact.email
-            record.status = "skipped"
-            record.next_retry_at = None
-            record.skipped_reason = "Address is unsubscribed/suppressed"
-            record.error_message = "Address is unsubscribed/suppressed"
-
-    db.commit()
-
-    
     # Record selected unsubscribed contacts as skipped.
     pending_ids = {contact.id for contact in pending_contacts}
 
@@ -2647,6 +2665,7 @@ def launch_campaign(
                 )
                 db.add(record)
 
+            record.email = contact.email
             record.status = "skipped"
             record.next_retry_at = None
             record.skipped_reason = "Address is unsubscribed/suppressed"
@@ -2810,34 +2829,18 @@ def launch_campaign(
         # Atomic compare-and-set: only a pending recipient below the attempt
         # limit can be claimed by this request. Competing workers/requests that
         # changed the status first will get rowcount == 0 and will not send.
-        claim = db.execute(
-            update(CampaignRecipient)
-            .where(
-                CampaignRecipient.id == record.id,
-                CampaignRecipient.status == "pending",
-                CampaignRecipient.attempts < CampaignRecipient.max_attempts,
-            )
-            .values(
-                status="sending",
-                attempts=CampaignRecipient.attempts + 1,
-                last_attempt_at=datetime.now(timezone.utc),
-                rendered_subject=rendered_subject,
-                error_message=None,
-                next_retry_at=None,
-            )
+        claimed = claim_pending_recipient(
+            db=db,
+            record=record,
+            rendered_subject=rendered_subject,
         )
-
-        if claim.rowcount != 1:
-            db.rollback()
+        if not claimed:
             results.append({
                 "contact_id": contact.id,
                 "status": "skipped",
                 "reason": "Another process claimed this recipient",
             })
             continue
-
-        db.commit()
-        db.refresh(record)
 
         try:
 
@@ -2920,16 +2923,28 @@ def launch_campaign(
 
     remaining_count = max(0, len(pending_contacts) - len(batch))
 
-    if remaining_count or retry_scheduled_count:
-
+    if scheduled:
+        # Keep scheduled campaigns eligible for the next scheduler tick when
+        # more pending recipients remain, including retries not yet due.
+        pending_remaining = (
+            db.query(CampaignRecipient.id)
+            .filter(
+                CampaignRecipient.campaign_id == campaign.id,
+                CampaignRecipient.status == "pending",
+            )
+            .count()
+        )
+        if pending_remaining:
+            campaign.status = "scheduled"
+        elif failed_count:
+            campaign.status = "completed_with_errors"
+        else:
+            campaign.status = "completed"
+    elif remaining_count or retry_scheduled_count:
         campaign.status = "paused"
-
     elif failed_count:
-
         campaign.status = "completed_with_errors"
-
     else:
-
         campaign.status = "completed"
 
     db.commit()
@@ -2961,3 +2976,20 @@ def launch_campaign(
         ),
 
     }
+
+
+@app.post("/campaigns/{campaign_id}/launch")
+def launch_campaign(
+    campaign_id: int,
+    payload: CampaignLaunchRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_database_user),
+):
+    """Explicitly confirmed manual launch endpoint."""
+    return _launch_campaign(
+        campaign_id=campaign_id,
+        payload=payload,
+        db=db,
+        current_user=current_user,
+        scheduled=False,
+    )
