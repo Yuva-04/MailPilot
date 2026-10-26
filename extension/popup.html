@@ -90,7 +90,7 @@
           </button>
           <p class="hint">
             Requires a protected backend operation and explicit confirmation.
-            This action requires confirmation and a valid, protected backend endpoint.
+          </p>
         </div>
       </section>
 
@@ -154,9 +154,7 @@
 
         <form id="contactForm" class="panel">
           <h3>Import Contacts from CSV</h3>
-          <p class="muted">
-            Upload a CSV file containing contact information.
-          </p>
+          <p class="muted">Upload a CSV file containing contact information.</p>
 
           <label for="csvFile">Choose CSV File</label>
           <input
@@ -193,7 +191,6 @@
           </div>
         </div>
 
-        <!-- Edit form: hidden until a contact is selected for editing -->
         <form id="editContactForm" class="panel" hidden>
           <h3>Edit Contact</h3>
 
@@ -288,10 +285,11 @@
         <div class="page-heading">
           <div>
             <h2>Campaigns</h2>
-            <p class="muted">Create, validate, send, and track campaigns.</p>
+            <p class="muted">Create, schedule, validate, send, and track campaigns.</p>
           </div>
         </div>
 
+        <!-- CREATE AND SCHEDULE CAMPAIGN -->
         <form id="campaignForm" class="panel">
           <h3>Create Campaign</h3>
 
@@ -309,12 +307,101 @@
             <option value="">Select a template</option>
           </select>
 
-          <button class="button primary" type="submit">Create Campaign</button>
+          <div class="divider">
+            <h3>Schedule Settings</h3>
+            <p class="muted">
+              Leave the date and time empty to create a draft campaign.
+              Choose a future date and time to schedule it.
+            </p>
+          </div>
+
+          <label for="campaignScheduleDate">Schedule Date</label>
+          <input
+            id="campaignScheduleDate"
+            name="schedule_date"
+            type="date"
+          >
+
+          <label for="campaignScheduleTime">Schedule Time</label>
+          <input
+            id="campaignScheduleTime"
+            name="schedule_time"
+            type="time"
+          >
+
+          <label for="campaignTimezone">Timezone</label>
+          <select id="campaignTimezone" name="timezone">
+            <option value="Asia/Kolkata" selected>
+              India Standard Time (Asia/Kolkata, UTC+05:30)
+            </option>
+            <option value="UTC">UTC</option>
+          </select>
+
+          <p class="hint">
+            Scheduled campaigns are saved first and sent by the backend scheduler
+            when they become due. Keep the backend running.
+          </p>
+
+          <div class="divider">
+            <h3>Choose Recipients *</h3>
+            <p class="muted">
+              Select the contacts who should receive this campaign.
+              Unsubscribed contacts must not be selected.
+            </p>
+          </div>
+
+          <div class="button-row">
+            <button
+              id="refreshScheduleContactsBtn"
+              class="button secondary small"
+              type="button"
+            >
+              Refresh Contacts
+            </button>
+            <button
+              id="selectAllScheduleContactsBtn"
+              class="button secondary small"
+              type="button"
+            >
+              Select All
+            </button>
+            <button
+              id="clearScheduleContactsBtn"
+              class="button secondary small"
+              type="button"
+            >
+              Clear Selection
+            </button>
+          </div>
+
+          <p id="scheduleSelectedContactCount" class="hint" aria-live="polite">
+            0 contacts selected.
+          </p>
+
+          <div
+            id="scheduleRecipientList"
+            class="record-list"
+            aria-live="polite"
+          >
+            Loading contacts...
+          </div>
+
+          <button class="button primary" type="submit">
+            Create / Schedule Campaign
+          </button>
+
           <p id="campaignMessage" class="status-message" aria-live="polite">
             No campaign created yet.
           </p>
+
+          <p class="hint warning-text">
+            Scheduling does not send emails immediately. Verify the template,
+            schedule, and selected recipients before submitting. Scheduled
+            campaigns may send real emails automatically when due.
+          </p>
         </form>
 
+        <!-- CAMPAIGN PREFLIGHT -->
         <div class="panel">
           <h3>Campaign Preflight</h3>
           <p class="muted">
@@ -335,10 +422,11 @@
           </div>
         </div>
 
+        <!-- IMMEDIATE SENDING -->
         <div class="panel">
-          <h3>Choose Campaign Recipients</h3>
+          <h3>Send Campaign Now</h3>
           <p class="muted">
-            Select the specific contacts who should receive the campaign.
+            Choose a draft campaign and select the contacts who should receive it now.
           </p>
 
           <label for="recipientCampaign">Select Draft Campaign</label>
@@ -347,13 +435,25 @@
           </select>
 
           <div class="button-row">
-            <button id="refreshContactsBtn" class="button secondary small" type="button">
+            <button
+              id="refreshContactsBtn"
+              class="button secondary small"
+              type="button"
+            >
               Refresh Contacts
             </button>
-            <button id="selectAllContactsBtn" class="button secondary small" type="button">
+            <button
+              id="selectAllContactsBtn"
+              class="button secondary small"
+              type="button"
+            >
               Select All
             </button>
-            <button id="clearContactsBtn" class="button secondary small" type="button">
+            <button
+              id="clearContactsBtn"
+              class="button secondary small"
+              type="button"
+            >
               Clear Selection
             </button>
           </div>
@@ -371,11 +471,12 @@
           </button>
 
           <p class="hint warning-text">
-            This action sends real emails. Verify the campaign and selected
+            This action sends real emails immediately. Verify the campaign and
             recipients before sending.
           </p>
         </div>
 
+        <!-- CAMPAIGN REPORT -->
         <div class="panel">
           <h3>Campaign Report</h3>
           <p class="muted">
@@ -396,6 +497,7 @@
           </div>
         </div>
 
+        <!-- SAVED CAMPAIGNS -->
         <div class="panel">
           <div class="panel-heading">
             <div>
@@ -404,7 +506,11 @@
                 Review your campaigns or delete a campaign you no longer need.
               </p>
             </div>
-            <button id="refreshCampaignsBtn" class="button secondary small" type="button">
+            <button
+              id="refreshCampaignsBtn"
+              class="button secondary small"
+              type="button"
+            >
               Refresh
             </button>
           </div>
@@ -414,8 +520,8 @@
           </div>
 
           <p class="hint">
-            Deleting a campaign should remove only that campaign and its
-            associated records, as permitted by the backend.
+            Deleting a campaign may remove its associated records, depending
+            on the backend implementation.
           </p>
         </div>
       </section>

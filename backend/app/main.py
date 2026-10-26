@@ -1,6 +1,7 @@
 import csv
 
 import io
+import html
 
 import os
 
@@ -35,7 +36,9 @@ from app.security import encrypt_refresh_token
 
 
 
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, HTMLResponse
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+from urllib.parse import quote
 from app.retry_worker import process_due_retries
 from app.database import SessionLocal
 from app.services.gmail_services import send_email
@@ -118,6 +121,8 @@ async def lifespan(app: FastAPI):
     # Keep the scheduler stopped unless at least one worker is explicitly enabled.
     if retry_enabled or scheduled_checks_enabled:
         scheduler.start()
+        print("Scheduler started:", scheduler.running)
+        print("Scheduled campaign checks enabled:", scheduled_checks_enabled)
 
     app.state.retry_scheduler = scheduler
     app.state.email_retries_enabled = retry_enabled
@@ -426,6 +431,135 @@ def home():
 def health():
 
     return {"status": "healthy"}
+
+# --------------------------------------------------
+# RECIPIENT SUBSCRIPTION PREFERENCES
+# --------------------------------------------------
+
+SUBSCRIPTION_TOKEN_MAX_AGE = 60 * 60 * 24 * 180  # 180 days
+
+
+def _subscription_serializer() -> URLSafeTimedSerializer:
+    """Create a signer using the application's secret key."""
+    return URLSafeTimedSerializer(
+        secret_key=settings.SESSION_SECRET_KEY,
+        salt="mailpilot-recipient-subscription-v1",
+    )
+
+
+def _create_subscription_token(contact: Contact) -> str:
+    """Create a signed token bound to this contact ID and current email."""
+    return _subscription_serializer().dumps({
+        "contact_id": contact.id,
+        "email": contact.email.strip().casefold(),
+        "purpose": "subscription_preferences",
+    })
+
+
+def _resolve_subscription_token(token: str, db: Session) -> Contact:
+    """Validate a subscription token and ensure the contact still matches it."""
+    try:
+        data = _subscription_serializer().loads(
+            token,
+            max_age=SUBSCRIPTION_TOKEN_MAX_AGE,
+        )
+    except SignatureExpired as exc:
+        raise HTTPException(
+            status_code=410,
+            detail="This subscription link has expired. Contact the sender for a new link.",
+        ) from exc
+    except BadSignature as exc:
+        raise HTTPException(status_code=400, detail="Invalid subscription link.") from exc
+
+    if data.get("purpose") != "subscription_preferences":
+        raise HTTPException(status_code=400, detail="Invalid subscription link.")
+
+    contact = db.query(Contact).filter(Contact.id == data.get("contact_id")).first()
+    if contact is None or contact.email.strip().casefold() != data.get("email"):
+        raise HTTPException(
+            status_code=410,
+            detail="This subscription link is no longer valid. Contact the sender for help.",
+        )
+    return contact
+
+
+def _subscription_page(contact: Contact, token: str, message: str = "") -> str:
+    """Render a small recipient-facing preference page without exposing IDs."""
+    status = "Unsubscribed" if contact.is_unsubscribed else "Subscribed"
+    safe_email = html.escape(contact.email)
+    safe_status = html.escape(status)
+    safe_message = html.escape(message)
+    safe_token = quote(token, safe="")
+    action = "subscribe" if contact.is_unsubscribed else "unsubscribe"
+    button_label = "Subscribe again" if contact.is_unsubscribed else "Unsubscribe"
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MailPilot subscription preferences</title>
+<style>body{{font-family:Arial,sans-serif;max-width:560px;margin:48px auto;padding:24px;line-height:1.5;color:#202124}}.card{{border:1px solid #dadce0;border-radius:14px;padding:24px}}.muted{{color:#5f6368}}button{{padding:11px 16px;border:0;border-radius:8px;background:#1967d2;color:white;font-size:15px;cursor:pointer}}.notice{{padding:10px;background:#e6f4ea;border-radius:8px}}</style></head>
+<body><main class="card"><h1>Email preferences</h1><p class="muted">Email address: <strong>{safe_email}</strong></p>
+<p>Current status: <strong>{safe_status}</strong></p>{f'<p class="notice">{safe_message}</p>' if safe_message else ''}
+<form method="post" action="/subscription/{safe_token}"><input type="hidden" name="action" value="{action}"><button type="submit">{button_label}</button></form>
+<p class="muted">Your choice will apply to future MailPilot campaigns. This page is specific to the recipient link sent to this address.</p></main></body></html>"""
+
+
+@app.get("/subscription/{token}", response_class=HTMLResponse, include_in_schema=True)
+def subscription_preferences_page(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """Show a recipient's current subscription status; GET never changes it."""
+    contact = _resolve_subscription_token(token, db)
+    return HTMLResponse(_subscription_page(contact, token))
+
+
+@app.post("/subscription/{token}", response_class=HTMLResponse, include_in_schema=True)
+async def update_subscription_from_email(
+    token: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Apply an explicit subscribe/unsubscribe action from the recipient page."""
+    contact = _resolve_subscription_token(token, db)
+    form = await request.form()
+    action = str(form.get("action", "")).strip().lower()
+    if action not in {"subscribe", "unsubscribe"}:
+        raise HTTPException(status_code=400, detail="Choose subscribe or unsubscribe.")
+
+    contact.is_unsubscribed = action == "unsubscribe"
+    try:
+
+
+        if action == "unsubscribe":
+            from app.models import CampaignRecipient
+
+            pending_recipients = (
+                db.query(CampaignRecipient)
+                .filter(
+                    CampaignRecipient.contact_id == contact.id,
+                    CampaignRecipient.status == "pending",
+                )
+                .all()
+            )
+
+            for recipient in pending_recipients:
+                recipient.status = "skipped"
+                recipient.next_retry_at = None
+                recipient.skipped_reason = "Recipient has unsubscribed."
+                recipient.error_message = "Recipient has unsubscribed."
+
+            db.commit()
+            db.refresh(contact)
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Could not update subscription preferences.")
+
+    message = (
+        "You have been unsubscribed from future campaign emails."
+        if contact.is_unsubscribed
+        else "You have subscribed again to future campaign emails."
+    )
+    return HTMLResponse(_subscription_page(contact, token, message))
+
 
 # --------------------------------------------------
 
@@ -2451,7 +2585,7 @@ def _launch_campaign(
 
         raise HTTPException(status_code=404, detail="Campaign not found.")
 
-    
+
     if scheduled:
         scheduled_at = campaign.scheduled_at
         if scheduled_at is not None and scheduled_at.tzinfo is None:
@@ -2624,8 +2758,8 @@ def _launch_campaign(
         pending_contacts.append(contact)
 
     batch = pending_contacts[:payload.max_recipients]
-    
-    
+
+
     # Record selected unsubscribed contacts as skipped.
     pending_ids = {contact.id for contact in pending_contacts}
 
@@ -2708,7 +2842,7 @@ def _launch_campaign(
         attempts=0,
     )
 )
-                
+
 
         db.flush()
         campaign.status = "sending"
@@ -2759,8 +2893,8 @@ def _launch_campaign(
             })
             continue
 
-        
-        
+
+
 
         record = db.query(CampaignRecipient).filter(
 
@@ -2854,7 +2988,13 @@ def _launch_campaign(
 
                 subject=record.rendered_subject,
 
-                body=render_campaign_text(template.body, contact),
+                body=(
+                    render_campaign_text(template.body, contact)
+                    + "\n\nManage your email subscription: "
+                    + os.getenv("PUBLIC_BASE_URL", "http://127.0.0.1:8001").rstrip("/")
+                    + "/subscription/"
+                    + _create_subscription_token(contact)
+                ),
 
             )
 

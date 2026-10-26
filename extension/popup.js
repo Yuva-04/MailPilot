@@ -6,9 +6,11 @@ const $ = (id) => document.getElementById(id);
 let contactsCache = [];
 let templatesCache = [];
 let campaignsCache = [];
-const selectedContactIds = new Set();
 
-// -------------------- API helpers --------------------
+const selectedContactIds = new Set();
+const scheduleSelectedContactIds = new Set();
+
+// -------------------- API HELPERS --------------------
 
 async function apiRequest(path, options = {}) {
   const headers = { ...(options.headers || {}) };
@@ -102,7 +104,7 @@ function setMessage(id, message, isError = false) {
   element.classList.toggle("success", !isError);
 }
 
-// -------------------- Navigation --------------------
+// -------------------- NAVIGATION --------------------
 
 function showSection(sectionId) {
   document.querySelectorAll(".section").forEach((section) => {
@@ -126,13 +128,13 @@ function showSection(sectionId) {
   }
 
   if (sectionId === "campaigns") {
-    loadCampaigns().catch((error) =>
-      showError(error, "Could not load campaigns")
+    Promise.all([loadCampaigns(), loadContacts()]).catch((error) =>
+      showError(error, "Could not load campaign data")
     );
   }
 }
 
-// -------------------- Dashboard --------------------
+// -------------------- DASHBOARD --------------------
 
 async function loadDashboard() {
   const [contactsResult, templatesResult, campaignsResult] =
@@ -162,7 +164,7 @@ async function loadDashboard() {
   }
 }
 
-// -------------------- Gmail connection --------------------
+// -------------------- GMAIL CONNECTION --------------------
 
 async function checkGmailStatus() {
   const badge = $("connectionBadge");
@@ -218,15 +220,37 @@ function openAuthPage() {
   }
 }
 
-// -------------------- Contacts --------------------
+// -------------------- CONTACTS --------------------
 
 async function loadContacts() {
   const result = await apiRequest("/contacts?skip=0&limit=100");
 
   contactsCache = getList(result, "contacts");
 
+  // Remove deleted contact IDs from the selections.
+  const validIds = new Set(contactsCache.map((contact) => Number(contact.id)));
+
+  for (const id of selectedContactIds) {
+    if (!validIds.has(id)) selectedContactIds.delete(id);
+  }
+
+  for (const id of scheduleSelectedContactIds) {
+    if (!validIds.has(id)) scheduleSelectedContactIds.delete(id);
+  }
+
+  // Remove unsubscribed contacts from both selections.
+  contactsCache
+    .filter((contact) => contact.is_unsubscribed)
+    .forEach((contact) => {
+      selectedContactIds.delete(Number(contact.id));
+      scheduleSelectedContactIds.delete(Number(contact.id));
+    });
+
   renderRecipientOptions();
+  renderScheduleRecipientOptions();
+
   updateSelectedContactCount();
+  updateScheduleSelectedContactCount();
 
   return contactsCache;
 }
@@ -247,14 +271,12 @@ async function loadSavedContacts() {
   }
 }
 
-
 function renderSavedContacts() {
   const container = $("savedContactsList");
   if (!container) return;
 
   container.replaceChildren();
 
-  // Create the search and company filter controls once.
   let searchInput = $("contactSearchInput");
   let companyFilter = $("contactCompanyFilter");
 
@@ -266,11 +288,17 @@ function renderSavedContacts() {
     searchInput.id = "contactSearchInput";
     searchInput.type = "search";
     searchInput.placeholder = "Search by name or email...";
-    searchInput.setAttribute("aria-label", "Search contacts by name or email");
+    searchInput.setAttribute(
+      "aria-label",
+      "Search contacts by name or email"
+    );
 
     companyFilter = document.createElement("select");
     companyFilter.id = "contactCompanyFilter";
-    companyFilter.setAttribute("aria-label", "Filter contacts by company");
+    companyFilter.setAttribute(
+      "aria-label",
+      "Filter contacts by company"
+    );
 
     const allOption = document.createElement("option");
     allOption.value = "";
@@ -284,8 +312,8 @@ function renderSavedContacts() {
     companyFilter.addEventListener("change", renderSavedContacts);
   }
 
-  // Preserve the current company selection when refreshing the list.
   const selectedCompany = companyFilter.value;
+
   const companies = [
     ...new Set(
       contactsCache
@@ -328,7 +356,8 @@ function renderSavedContacts() {
     ].some((value) => value.toLowerCase().includes(query));
 
     const matchesCompany =
-      !companySelection || (contact.company || "").trim() === companySelection;
+      !companySelection ||
+      (contact.company || "").trim() === companySelection;
 
     return matchesSearch && matchesCompany;
   });
@@ -339,6 +368,7 @@ function renderSavedContacts() {
     empty.textContent = contactsCache.length
       ? "No contacts match your search or filter."
       : "No contacts saved yet.";
+
     container.appendChild(empty);
     return;
   }
@@ -366,7 +396,9 @@ function renderSavedContacts() {
     editButton.type = "button";
     editButton.className = "button small edit";
     editButton.textContent = "Edit";
-    editButton.addEventListener("click", () => beginEditContact(contact));
+    editButton.addEventListener("click", () =>
+      beginEditContact(contact)
+    );
 
     const deleteButton = document.createElement("button");
     deleteButton.type = "button";
@@ -381,7 +413,6 @@ function renderSavedContacts() {
     container.appendChild(card);
   });
 }
-
 
 async function addContact(event) {
   event.preventDefault();
@@ -514,6 +545,7 @@ async function deleteContact(contact, button) {
     });
 
     selectedContactIds.delete(Number(contact.id));
+    scheduleSelectedContactIds.delete(Number(contact.id));
 
     await Promise.all([loadSavedContacts(), loadDashboard()]);
     showNotice(`Contact "${label}" deleted.`);
@@ -527,7 +559,7 @@ async function deleteContact(contact, button) {
   }
 }
 
-// -------------------- CSV import --------------------
+// -------------------- CSV IMPORT --------------------
 
 async function importContacts(event) {
   event.preventDefault();
@@ -549,79 +581,80 @@ async function importContacts(event) {
     button.textContent = "Importing...";
   }
 
-  
-try {
-  const result = await apiRequest("/contacts/import", {
-    method: "POST",
-    body: formData,
-  });
-
-  setMessage(
-    "contactMessage",
-    [
-      result?.message || "CSV import completed.",
-      `Total rows: ${result?.total_rows ?? 0}`,
-      `Imported: ${result?.imported_count ?? result?.imported ?? 0}`,
-      `Duplicates skipped: ${result?.duplicate_count ?? result?.duplicates_skipped ?? 0}`,
-      `Invalid rows: ${result?.invalid_count ?? result?.invalid_rows ?? 0}`,
-    ].join("\n")
-  );
-
-  // Download a CSV report if any rows were skipped or invalid.
-  const errors = Array.isArray(result?.errors) ? result.errors : [];
-
-  if (errors.length > 0) {
-    const escapeCsv = (value) => {
-      const text = String(value ?? "");
-      return `"${text.replace(/"/g, '""')}"`;
-    };
-
-    const rows = [
-      ["Row", "Email", "Reason"],
-      ...errors.map((error) => [
-        error.row,
-        error.email,
-        error.reason,
-      ]),
-    ];
-
-    const csvContent =
-      "\uFEFF" + rows.map((row) => row.map(escapeCsv).join(",")).join("\r\n");
-
-    const blob = new Blob([csvContent], {
-      type: "text/csv;charset=utf-8;",
+  try {
+    const result = await apiRequest("/contacts/import", {
+      method: "POST",
+      body: formData,
     });
 
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "import_errors.csv";
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
+    setMessage(
+      "contactMessage",
+      [
+        result?.message || "CSV import completed.",
+        `Total rows: ${result?.total_rows ?? 0}`,
+        `Imported: ${result?.imported_count ?? result?.imported ?? 0}`,
+        `Duplicates skipped: ${result?.duplicate_count ?? result?.duplicates_skipped ?? 0}`,
+        `Invalid rows: ${result?.invalid_count ?? result?.invalid_rows ?? 0}`,
+      ].join("\n")
+    );
 
-    showNotice("Import completed. Error report downloaded.");
-  } else {
-    showNotice("CSV import completed. No errors found.");
-  }
+    const errors = Array.isArray(result?.errors) ? result.errors : [];
 
-  $("contactForm").reset();
-  await Promise.all([loadSavedContacts(), loadDashboard()]);
-} catch (error) {
-  setMessage("contactMessage", error.message, true);
-  showError(error, "Could not import CSV");
-} finally {
-  if (button) {
-    button.disabled = false;
-    button.textContent = "Import CSV";
+    if (errors.length > 0) {
+      const escapeCsv = (value) => {
+        const text = String(value ?? "");
+        return `"${text.replace(/"/g, '""')}"`;
+      };
+
+      const rows = [
+        ["Row", "Email", "Reason"],
+        ...errors.map((error) => [
+          error.row,
+          error.email,
+          error.reason,
+        ]),
+      ];
+
+      const csvContent =
+        "\uFEFF" +
+        rows.map((row) => row.map(escapeCsv).join(",")).join("\r\n");
+
+      const blob = new Blob([csvContent], {
+        type: "text/csv;charset=utf-8;",
+      });
+
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+
+      link.href = url;
+      link.download = "import_errors.csv";
+
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+
+      URL.revokeObjectURL(url);
+
+      showNotice("Import completed. Error report downloaded.");
+    } else {
+      showNotice("CSV import completed. No errors found.");
+    }
+
+    $("contactForm").reset();
+
+    await Promise.all([loadSavedContacts(), loadDashboard()]);
+  } catch (error) {
+    setMessage("contactMessage", error.message, true);
+    showError(error, "Could not import CSV");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "Import CSV";
+    }
   }
 }
-}
 
- 
-
-// -------------------- Templates --------------------
+// -------------------- TEMPLATES --------------------
 
 async function loadTemplates() {
   const result = await apiRequest("/templates");
@@ -721,13 +754,14 @@ async function loadTemplates() {
 
       const contact = contactsCache[index];
 
-      // Use the selected contact's own information for personalization.
       const email = String(contact.email || "").trim();
       const firstName = String(contact.first_name || "").trim();
       const lastName = String(contact.last_name || "").trim();
+
       const fullName =
         [firstName, lastName].filter(Boolean).join(" ") ||
         String(contact.name || "").trim();
+
       const nameParts = fullName.split(/\s+/).filter(Boolean);
 
       const values = {
@@ -738,64 +772,11 @@ async function loadTemplates() {
         company: String(contact.company || "").trim(),
       };
 
-      const escapeRegExp = (value) =>
-        String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-      const replaceLiteralIgnoreCase = (text, oldValue, newValue) => {
-        if (!oldValue || oldValue === newValue) return text;
-
-        return text.replace(
-          new RegExp(escapeRegExp(oldValue), "gi"),
-          () => newValue
-        );
-      };
-
-      const personalize = (text) => {
-        let result = String(text || "");
-
-        result = result.replace(
+      const personalize = (text) =>
+        String(text || "").replace(
           /\{\{\s*(first_name|last_name|name|email|company)\s*\}\}/gi,
           (_, key) => values[key.toLowerCase()] ?? ""
         );
-
-        // Replace known literal contact names/emails in older templates.
-        const knownValues = [];
-
-        for (const savedContact of contactsCache) {
-          const savedFirst = String(savedContact.first_name || "").trim();
-          const savedLast = String(savedContact.last_name || "").trim();
-
-          const savedFullName =
-            [savedFirst, savedLast].filter(Boolean).join(" ") ||
-            String(savedContact.name || "").trim();
-
-          const savedEmail = String(savedContact.email || "").trim();
-
-          if (savedFullName && savedEmail) {
-            knownValues.push({
-              oldValue: savedFullName,
-              newValue: values.name,
-            });
-
-            knownValues.push({
-              oldValue: savedEmail,
-              newValue: values.email,
-            });
-          }
-        }
-
-        knownValues.sort((a, b) => b.oldValue.length - a.oldValue.length);
-
-        for (const item of knownValues) {
-          result = replaceLiteralIgnoreCase(
-            result,
-            item.oldValue,
-            item.newValue
-          );
-        }
-
-        return result;
-      };
 
       const overlay = document.createElement("div");
 
@@ -825,7 +806,8 @@ async function loadTemplates() {
       });
 
       const heading = document.createElement("h2");
-      heading.textContent = `Edit Preview — ${template.name || "Untitled"}`;
+      heading.textContent =
+        `Edit Preview — ${template.name || "Untitled"}`;
 
       const recipient = document.createElement("p");
       recipient.textContent = `To: ${contact.email || "No email"}`;
@@ -945,8 +927,6 @@ async function loadTemplates() {
       subjectInput.focus();
     });
 
-    // Delete is created here in JavaScript, so popup.html needs only
-    // the existing <div id="templateList"> container.
     const deleteButton = document.createElement("button");
     deleteButton.type = "button";
     deleteButton.className = "button small danger";
@@ -1024,16 +1004,67 @@ async function saveTemplate(event) {
   }
 }
 
-// -------------------- Campaigns --------------------
+// -------------------- CAMPAIGN SCHEDULING --------------------
+
+function getScheduleDateTimePayload() {
+  const date = $("campaignScheduleDate")?.value || "";
+  const time = $("campaignScheduleTime")?.value || "";
+  const timezone = $("campaignTimezone")?.value || "Asia/Kolkata";
+
+  if (!date && !time) {
+    return {
+      scheduled_at: null,
+      timezone,
+    };
+  }
+
+  if (!date || !time) {
+    throw new Error(
+      "Choose both a schedule date and a schedule time, or leave both empty to create a draft."
+    );
+  }
+
+  // This UI supports UTC and India Standard Time.
+  const offset = timezone === "UTC" ? "Z" : "+05:30";
+  const parsed = new Date(`${date}T${time}:00${offset}`);
+
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error("The schedule date or time is invalid.");
+  }
+
+  if (parsed.getTime() <= Date.now()) {
+    throw new Error("Choose a future date and time for scheduling.");
+  }
+
+  return {
+    scheduled_at: parsed.toISOString(),
+    timezone,
+  };
+}
 
 async function createCampaign(event) {
   event.preventDefault();
 
-  const button = $("campaignForm")?.querySelector('button[type="submit"]');
+  const form = $("campaignForm");
+  const button = form?.querySelector('button[type="submit"]');
+
+  let schedule;
+
+  try {
+    schedule = getScheduleDateTimePayload();
+  } catch (error) {
+    setMessage("campaignMessage", error.message, true);
+    showNotice(error.message, true);
+    return;
+  }
+
+  const contactIds = [...scheduleSelectedContactIds];
 
   const payload = {
     name: $("campaignName").value.trim(),
     template_id: Number($("campaignTemplate").value),
+    contact_ids: contactIds,
+    timezone: schedule.timezone,
   };
 
   if (!payload.name || !payload.template_id) {
@@ -1041,9 +1072,22 @@ async function createCampaign(event) {
     return;
   }
 
+  if (!contactIds.length) {
+    const message = "Select at least one recipient for this campaign.";
+    showNotice(message, true);
+    setMessage("campaignMessage", message, true);
+    return;
+  }
+
+  if (schedule.scheduled_at) {
+    payload.scheduled_at = schedule.scheduled_at;
+  }
+
   if (button) {
     button.disabled = true;
-    button.textContent = "Creating...";
+    button.textContent = schedule.scheduled_at
+      ? "Scheduling..."
+      : "Creating...";
   }
 
   try {
@@ -1052,25 +1096,47 @@ async function createCampaign(event) {
       body: JSON.stringify(payload),
     });
 
-    $("campaignForm").reset();
+    form.reset();
 
-    setMessage(
-      "campaignMessage",
-      result?.message || "Campaign created successfully."
-    );
+    // Restore India as the default timezone after resetting the form.
+    if ($("campaignTimezone")) {
+      $("campaignTimezone").value = "Asia/Kolkata";
+    }
+
+    scheduleSelectedContactIds.clear();
+
+    renderScheduleRecipientOptions();
+    updateScheduleSelectedContactCount();
+
+    const scheduled = Boolean(schedule.scheduled_at);
+
+    const successMessage =
+      result?.message ||
+      (scheduled
+        ? "Campaign scheduled successfully."
+        : "Draft campaign created successfully.");
+
+    setMessage("campaignMessage", successMessage);
 
     await Promise.all([loadCampaigns(), loadDashboard()]);
-    showNotice("Campaign created successfully.");
+
+    showNotice(
+      scheduled
+        ? "Campaign scheduled. Check its saved status and scheduled time."
+        : "Draft campaign created successfully."
+    );
   } catch (error) {
     setMessage("campaignMessage", error.message, true);
     showError(error, "Could not create campaign");
   } finally {
     if (button) {
       button.disabled = false;
-      button.textContent = "Create Campaign";
+      button.textContent = "Create / Schedule Campaign";
     }
   }
 }
+
+// -------------------- LOAD CAMPAIGNS --------------------
 
 async function loadCampaigns() {
   const result = await apiRequest("/campaigns");
@@ -1118,7 +1184,8 @@ function populateCampaignSelect(id, draftsOnly) {
 function renderCampaignList() {
   const container = $("campaignList");
   if (!container) return;
-    container.replaceChildren();
+
+  container.replaceChildren();
 
   if (!campaignsCache.length) {
     const empty = document.createElement("div");
@@ -1138,6 +1205,18 @@ function renderCampaignList() {
     const status = document.createElement("p");
     status.textContent =
       `Status: ${campaign.status || "unknown"} · ID: ${campaign.id}`;
+
+    const details = document.createElement("p");
+
+    if (campaign.scheduled_at) {
+      const scheduledDate = new Date(campaign.scheduled_at);
+
+      details.textContent = Number.isNaN(scheduledDate.getTime())
+        ? `Scheduled at: ${campaign.scheduled_at}`
+        : `Scheduled at: ${scheduledDate.toLocaleString()} (${campaign.timezone || "timezone not specified"})`;
+    } else {
+      details.textContent = "No scheduled time.";
+    }
 
     const actions = document.createElement("div");
     actions.className = "record-actions";
@@ -1178,7 +1257,7 @@ function renderCampaignList() {
     );
 
     actions.append(preflightButton, reportButton, deleteButton);
-    card.append(title, status, actions);
+    card.append(title, status, details, actions);
     container.appendChild(card);
   });
 }
@@ -1231,7 +1310,7 @@ async function deleteCampaign(campaign, button) {
   }
 }
 
-// -------------------- Campaign preflight --------------------
+// -------------------- CAMPAIGN PREFLIGHT --------------------
 
 async function runPreflight() {
   const campaignId = $("preflightCampaign")?.value;
@@ -1273,7 +1352,7 @@ async function runPreflight() {
   }
 }
 
-// -------------------- Recipient selection --------------------
+// -------------------- IMMEDIATE-SEND RECIPIENTS --------------------
 
 function renderRecipientOptions() {
   const container = $("recipientList");
@@ -1281,15 +1360,19 @@ function renderRecipientOptions() {
 
   container.replaceChildren();
 
-  if (!contactsCache.length) {
+  const eligibleContacts = contactsCache.filter(
+    (contact) => !contact.is_unsubscribed
+  );
+
+  if (!eligibleContacts.length) {
     container.textContent =
-      "No contacts available. Add or import contacts first.";
+      "No eligible contacts available. Add contacts first.";
 
     updateSelectedContactCount();
     return;
   }
 
-  contactsCache.forEach((contact) => {
+  eligibleContacts.forEach((contact) => {
     const label = document.createElement("label");
 
     label.style.display = "flex";
@@ -1300,7 +1383,6 @@ function renderRecipientOptions() {
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.checked = selectedContactIds.has(Number(contact.id));
-    checkbox.disabled = Boolean(contact.is_unsubscribed);
 
     checkbox.addEventListener("change", () => {
       const id = Number(contact.id);
@@ -1315,10 +1397,7 @@ function renderRecipientOptions() {
     });
 
     const text = document.createElement("span");
-
-    text.textContent = `${contact.email || "No email"}${
-      contact.is_unsubscribed ? " (unsubscribed)" : ""
-    }`;
+    text.textContent = contact.email || `Contact ${contact.id}`;
 
     label.append(checkbox, text);
     container.appendChild(label);
@@ -1336,7 +1415,90 @@ function updateSelectedContactCount() {
   }
 }
 
-// -------------------- Send campaign --------------------
+// -------------------- SCHEDULED CAMPAIGN RECIPIENTS --------------------
+
+function renderScheduleRecipientOptions() {
+  const container = $("scheduleRecipientList");
+  if (!container) return;
+
+  container.replaceChildren();
+
+  const eligibleContacts = contactsCache.filter(
+    (contact) => !contact.is_unsubscribed
+  );
+
+  if (!eligibleContacts.length) {
+    container.textContent =
+      "No eligible contacts available. Add contacts first; unsubscribed contacts cannot be selected.";
+
+    updateScheduleSelectedContactCount();
+    return;
+  }
+
+  eligibleContacts.forEach((contact) => {
+    const label = document.createElement("label");
+
+    label.style.display = "flex";
+    label.style.alignItems = "center";
+    label.style.gap = "9px";
+    label.style.padding = "8px 0";
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = scheduleSelectedContactIds.has(Number(contact.id));
+
+    checkbox.setAttribute(
+      "aria-label",
+      `Select ${contact.email || `contact ${contact.id}`} for campaign`
+    );
+
+    checkbox.addEventListener("change", () => {
+      const id = Number(contact.id);
+
+      if (checkbox.checked) {
+        scheduleSelectedContactIds.add(id);
+      } else {
+        scheduleSelectedContactIds.delete(id);
+      }
+
+      updateScheduleSelectedContactCount();
+    });
+
+    const text = document.createElement("span");
+    text.textContent = contact.email || `Contact ${contact.id}`;
+
+    label.append(checkbox, text);
+    container.appendChild(label);
+  });
+
+  updateScheduleSelectedContactCount();
+}
+
+function updateScheduleSelectedContactCount() {
+  const element = $("scheduleSelectedContactCount");
+
+  if (element) {
+    element.textContent =
+      `${scheduleSelectedContactIds.size} contact(s) selected for this campaign.`;
+  }
+}
+
+function selectAllScheduleContacts() {
+  contactsCache
+    .filter((contact) => !contact.is_unsubscribed)
+    .forEach((contact) => {
+      scheduleSelectedContactIds.add(Number(contact.id));
+    });
+
+  renderScheduleRecipientOptions();
+}
+
+function clearScheduleContacts() {
+  scheduleSelectedContactIds.clear();
+  renderScheduleRecipientOptions();
+}
+
+// -------------------- SEND CAMPAIGN NOW --------------------
 
 async function sendSelectedCampaign() {
   const campaignId = $("recipientCampaign")?.value;
@@ -1395,7 +1557,7 @@ async function sendSelectedCampaign() {
   }
 }
 
-// -------------------- Campaign report --------------------
+// -------------------- CAMPAIGN REPORT --------------------
 
 async function loadCampaignReport(campaignId) {
   if (!campaignId) {
@@ -1405,7 +1567,9 @@ async function loadCampaignReport(campaignId) {
 
   const container = $("campaignReportResult");
 
-  if (container) container.textContent = "Loading report...";
+  if (container) {
+    container.textContent = "Loading report...";
+  }
 
   try {
     const result = await apiRequest(
@@ -1416,12 +1580,15 @@ async function loadCampaignReport(campaignId) {
       container.textContent = JSON.stringify(result, null, 2);
     }
   } catch (error) {
-    if (container) container.textContent = error.message;
+    if (container) {
+      container.textContent = error.message;
+    }
+
     showError(error, "Could not load campaign report");
   }
 }
 
-// -------------------- Reset application data --------------------
+// -------------------- RESET APPLICATION DATA --------------------
 
 async function resetAllData() {
   if (
@@ -1449,6 +1616,7 @@ async function resetAllData() {
     await apiRequest(RESET_ENDPOINT, { method: "POST" });
 
     selectedContactIds.clear();
+    scheduleSelectedContactIds.clear();
 
     await Promise.all([
       loadSavedContacts(),
@@ -1471,15 +1639,19 @@ async function resetAllData() {
   }
 }
 
-// -------------------- Initialization --------------------
+// -------------------- INITIALIZATION --------------------
 
 function initialize() {
   document.querySelectorAll(".tab").forEach((tab) => {
-    tab.addEventListener("click", () => showSection(tab.dataset.section));
+    tab.addEventListener("click", () => {
+      showSection(tab.dataset.section);
+    });
   });
 
   document.querySelectorAll("[data-go]").forEach((button) => {
-    button.addEventListener("click", () => showSection(button.dataset.go));
+    button.addEventListener("click", () => {
+      showSection(button.dataset.go);
+    });
   });
 
   $("connectGmailBtn")?.addEventListener("click", openAuthPage);
@@ -1507,8 +1679,27 @@ function initialize() {
   $("templateForm")?.addEventListener("submit", saveTemplate);
   $("campaignForm")?.addEventListener("submit", createCampaign);
 
+  // Scheduling recipient controls.
+  $("refreshScheduleContactsBtn")?.addEventListener("click", () =>
+    loadContacts().catch((error) =>
+      showError(error, "Could not refresh schedule recipients")
+    )
+  );
+
+  $("selectAllScheduleContactsBtn")?.addEventListener(
+    "click",
+    selectAllScheduleContacts
+  );
+
+  $("clearScheduleContactsBtn")?.addEventListener(
+    "click",
+    clearScheduleContacts
+  );
+
+  // Preflight.
   $("preflightBtn")?.addEventListener("click", runPreflight);
 
+  // Immediate-send recipient controls.
   $("refreshContactsBtn")?.addEventListener("click", () =>
     loadContacts().catch((error) =>
       showError(error, "Could not refresh recipient contacts")
@@ -1518,7 +1709,9 @@ function initialize() {
   $("selectAllContactsBtn")?.addEventListener("click", () => {
     contactsCache
       .filter((contact) => !contact.is_unsubscribed)
-      .forEach((contact) => selectedContactIds.add(Number(contact.id)));
+      .forEach((contact) => {
+        selectedContactIds.add(Number(contact.id));
+      });
 
     renderRecipientOptions();
   });
@@ -1548,6 +1741,7 @@ function initialize() {
     sendSelectedCampaign
   );
 
+  // Reports.
   $("loadReportBtn")?.addEventListener("click", () =>
     loadCampaignReport($("reportCampaign")?.value)
   );
@@ -1566,6 +1760,7 @@ function initialize() {
 
   $("resetDataBtn")?.addEventListener("click", resetAllData);
 
+  // Initial data loading.
   loadSavedContacts().catch((error) =>
     showError(error, "Could not load contacts")
   );
