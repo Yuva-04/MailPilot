@@ -61,13 +61,16 @@ def validate_retry(db: Session, record: CampaignRecipient):
         record.skipped_reason = (
             "Contact or campaign no longer exists."
         )
+        record.error_message = record.skipped_reason  # Add this
         return False, record.skipped_reason
 
     if contact.user_id != campaign.user_id:
         record.status = "skipped"
         record.next_retry_at = None
         record.skipped_reason = "Contact ownership mismatch."
+        record.error_message = record.skipped_reason  # Add this
         return False, record.skipped_reason
+
 
     if campaign.status not in {"sending", "paused"}:
         record.status = "skipped"
@@ -75,6 +78,7 @@ def validate_retry(db: Session, record: CampaignRecipient):
         record.skipped_reason = (
             "Campaign is not eligible for retry."
         )
+        record.error_message = record.skipped_reason  # Add this
         return False, record.skipped_reason
 
     recipient_email = (record.email or "").strip().casefold()

@@ -179,3 +179,52 @@ def test_worker_skips_paused_campaign(
 
     mock_launch.assert_not_called()
     db.close.assert_called_once()
+
+
+@patch("app.main._launch_campaign")
+@patch("app.main.CampaignLaunchRequest")
+@patch("app.scheduled_campaign_worker.SessionLocal")
+@patch("app.scheduled_campaign_worker.get_due_campaign_ids")
+def test_worker_passes_due_recipient_to_launch_suppression_guard(
+    mock_get_due_campaign_ids,
+    mock_session_local,
+    mock_payload_class,
+    mock_launch,
+):
+    campaign = MagicMock()
+    campaign.id = 123
+    campaign.user_id = 7
+    campaign.status = "scheduled"
+    campaign.scheduled_at = (
+        datetime.now(timezone.utc) - timedelta(minutes=1)
+    )
+
+    recipient = MagicMock()
+    recipient.contact_id = 456
+
+    db = setup_worker(campaign, recipient)
+    mock_session_local.return_value = db
+    mock_get_due_campaign_ids.return_value = [123]
+
+    mock_launch.return_value = {
+        "campaign_status": "scheduled",
+        "sent_count": 0,
+        "skipped_count": 1,
+        "retry_scheduled_count": 0,
+    }
+
+    run_scheduled_campaign_job()
+
+    mock_launch.assert_called_once_with(
+        123,
+        mock_payload_class.return_value,
+        db,
+        {"id": 7},
+        scheduled=True,
+    )
+    mock_payload_class.assert_called_once_with(
+        confirm=False,
+        contact_ids=[456],
+        max_recipients=1,
+    )
+    db.close.assert_called_once()

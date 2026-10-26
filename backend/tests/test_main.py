@@ -3,6 +3,8 @@ import os
 
 # Enable test mode before importing the application.
 os.environ["APP_ENV"] = "test"
+os.environ["ENABLE_EMAIL_RETRIES"] = "false"
+os.environ["ENABLE_SCHEDULED_CAMPAIGN_CHECKS"] = "false"
 
 import io
 from app.retry_worker import recover_stuck_sending_records
@@ -440,7 +442,7 @@ def test_campaign_preflight_ready(client):
         f"/campaigns/{campaign_id}/preflight"
     )
 
-    
+
     data = response.json()
 
     assert data["ready"] is True
@@ -885,7 +887,13 @@ from unittest.mock import MagicMock
 def test_lifespan_keeps_scheduler_disabled_by_default(monkeypatch):
     from app import main
 
-    monkeypatch.delenv("ENABLE_EMAIL_RETRIES", raising=False)
+
+
+    monkeypatch.delenv(
+        "ENABLE_SCHEDULED_CAMPAIGN_CHECKS",
+        raising=False,
+    )
+
 
     scheduler = MagicMock()
     monkeypatch.setattr(

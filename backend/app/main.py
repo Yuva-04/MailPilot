@@ -526,12 +526,9 @@ async def update_subscription_from_email(
         raise HTTPException(status_code=400, detail="Choose subscribe or unsubscribe.")
 
     contact.is_unsubscribed = action == "unsubscribe"
+
     try:
-
-
         if action == "unsubscribe":
-            from app.models import CampaignRecipient
-
             pending_recipients = (
                 db.query(CampaignRecipient)
                 .filter(
@@ -547,11 +544,15 @@ async def update_subscription_from_email(
                 recipient.skipped_reason = "Recipient has unsubscribed."
                 recipient.error_message = "Recipient has unsubscribed."
 
-            db.commit()
-            db.refresh(contact)
+        db.commit()
+        db.refresh(contact)
+
     except Exception:
         db.rollback()
-        raise HTTPException(status_code=500, detail="Could not update subscription preferences.")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not update subscription preferences.",
+        )
 
     message = (
         "You have been unsubscribed from future campaign emails."
@@ -2973,6 +2974,36 @@ def _launch_campaign(
                 "contact_id": contact.id,
                 "status": "skipped",
                 "reason": "Another process claimed this recipient",
+            })
+            continue
+
+        # Final suppression check after claiming the recipient and immediately
+        # before the Gmail API call. Suppress the whole normalized address if
+        # any contact record owned by this user has unsubscribed.
+        normalized_email = (contact.email or "").strip().casefold()
+        unsubscribed_match = None
+        if normalized_email:
+            unsubscribed_match = (
+                db.query(Contact.id)
+                .filter(
+                    Contact.user_id == current_user["id"],
+                    func.lower(func.trim(Contact.email)) == normalized_email,
+                    Contact.is_unsubscribed.is_(True),
+                )
+                .first()
+            )
+
+        if unsubscribed_match:
+            record.status = "skipped"
+            record.next_retry_at = None
+            record.skipped_reason = "Recipient has unsubscribed."
+            record.error_message = "Recipient has unsubscribed."
+            db.commit()
+            results.append({
+                "contact_id": contact.id,
+                "email": contact.email,
+                "status": "skipped",
+                "reason": "Recipient has unsubscribed.",
             })
             continue
 
